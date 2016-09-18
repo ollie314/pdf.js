@@ -1,5 +1,3 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
 /* Copyright 2012 Mozilla Foundation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +14,7 @@
  */
 /* jshint esnext:true */
 /* globals Components, Services, dump, XPCOMUtils, PdfStreamConverter,
-           PdfRedirector, APP_SHUTDOWN, DEFAULT_PREFERENCES */
+           APP_SHUTDOWN, PdfjsChromeUtils, PdfjsContentUtils */
 
 'use strict';
 
@@ -32,22 +30,12 @@ const Cr = Components.results;
 Cu.import('resource://gre/modules/XPCOMUtils.jsm');
 Cu.import('resource://gre/modules/Services.jsm');
 
-var Ph = Cc['@mozilla.org/plugin/host;1'].getService(Ci.nsIPluginHost);
-var registerOverlayPreview = 'getPlayPreviewInfo' in Ph;
-
 function getBoolPref(pref, def) {
   try {
     return Services.prefs.getBoolPref(pref);
   } catch (ex) {
     return def;
   }
-}
-
-function setStringPref(pref, value) {
-  var str = Cc['@mozilla.org/supports-string;1']
-              .createInstance(Ci.nsISupportsString);
-  str.data = value;
-  Services.prefs.setComplexValue(pref, Ci.nsISupportsString, str);
 }
 
 function log(str) {
@@ -58,7 +46,11 @@ function log(str) {
 }
 
 function initializeDefaultPreferences() {
-//#include ../../web/default_preferences.js
+  var DEFAULT_PREFERENCES =
+//#include ../../web/default_preferences.json
+//#if false
+    'end of DEFAULT_PREFERENCES';
+//#endif
 
   var defaultBranch = Services.prefs.getDefaultBranch(EXT_PREFIX + '.');
   var defaultValue;
@@ -91,12 +83,21 @@ Factory.prototype = {
     var registrar = Cm.QueryInterface(Ci.nsIComponentRegistrar);
     registrar.registerFactory(proto.classID, proto.classDescription,
                               proto.contractID, this);
+
+    if (proto.classID2) {
+      this._classID2 = proto.classID2;
+      registrar.registerFactory(proto.classID2, proto.classDescription,
+                                proto.contractID2, this);
+    }
   },
 
   unregister: function unregister() {
     var proto = this._targetConstructor.prototype;
     var registrar = Cm.QueryInterface(Ci.nsIComponentRegistrar);
     registrar.unregisterFactory(proto.classID, this);
+    if (this._classID2) {
+      registrar.unregisterFactory(this._classID2, this);
+    }
     this._targetConstructor = null;
   },
 
@@ -115,10 +116,9 @@ Factory.prototype = {
   }
 };
 
-var pdfStreamConverterUrl = null;
 var pdfStreamConverterFactory = new Factory();
-var pdfRedirectorUrl = null;
-var pdfRedirectorFactory = new Factory();
+var pdfBaseUrl = null;
+var e10sEnabled = false;
 
 // As of Firefox 13 bootstrapped add-ons don't support automatic registering and
 // unregistering of resource urls and components/contracts. Until then we do
@@ -132,29 +132,41 @@ function startup(aData, aReason) {
   var aliasURI = ioService.newURI('content/', 'UTF-8', aData.resourceURI);
   resProt.setSubstitution(RESOURCE_NAME, aliasURI);
 
+  pdfBaseUrl = aData.resourceURI.spec;
+
+  Cu.import(pdfBaseUrl + 'content/PdfjsChromeUtils.jsm');
+  PdfjsChromeUtils.init();
+  Cu.import(pdfBaseUrl + 'content/PdfjsContentUtils.jsm');
+  PdfjsContentUtils.init();
+
   // Load the component and register it.
-  pdfStreamConverterUrl = aData.resourceURI.spec +
-                          'content/PdfStreamConverter.jsm';
+  var pdfStreamConverterUrl = pdfBaseUrl + 'content/PdfStreamConverter.jsm';
   Cu.import(pdfStreamConverterUrl);
   pdfStreamConverterFactory.register(PdfStreamConverter);
 
-  if (registerOverlayPreview) {
-    pdfRedirectorUrl = aData.resourceURI.spec +
-                       'content/PdfRedirector.jsm';
-    Cu.import(pdfRedirectorUrl);
-    pdfRedirectorFactory.register(PdfRedirector);
-
-    Ph.registerPlayPreviewMimeType('application/pdf', true,
-      'data:application/x-moz-playpreview-pdfjs;,');
+  try {
+    let globalMM = Cc['@mozilla.org/globalmessagemanager;1']
+                     .getService(Ci.nsIFrameScriptLoader);
+    globalMM.loadFrameScript('chrome://pdf.js/content/content.js', true);
+    e10sEnabled = true;
+  } catch (ex) {
   }
 
   initializeDefaultPreferences();
 }
 
 function shutdown(aData, aReason) {
-  if (aReason == APP_SHUTDOWN) {
+  if (aReason === APP_SHUTDOWN) {
     return;
   }
+
+  if (e10sEnabled) {
+    let globalMM = Cc['@mozilla.org/globalmessagemanager;1']
+                     .getService(Ci.nsIMessageBroadcaster);
+    globalMM.broadcastAsyncMessage('PDFJS:Child:shutdown');
+    globalMM.removeDelayedFrameScript('chrome://pdf.js/content/content.js');
+  }
+
   var ioService = Services.io;
   var resProt = ioService.getProtocolHandler('resource')
                   .QueryInterface(Ci.nsIResProtocolHandler);
@@ -163,22 +175,19 @@ function shutdown(aData, aReason) {
   // Remove the contract/component.
   pdfStreamConverterFactory.unregister();
   // Unload the converter
+  var pdfStreamConverterUrl = pdfBaseUrl + 'content/PdfStreamConverter.jsm';
   Cu.unload(pdfStreamConverterUrl);
-  pdfStreamConverterUrl = null;
 
-  if (registerOverlayPreview) {
-    pdfRedirectorFactory.unregister();
-    Cu.unload(pdfRedirectorUrl);
-    pdfRedirectorUrl = null;
-
-    Ph.unregisterPlayPreviewMimeType('application/pdf');
-  }
+  PdfjsContentUtils.uninit();
+  Cu.unload(pdfBaseUrl + 'content/PdfjsContentUtils.jsm');
+  PdfjsChromeUtils.uninit();
+  Cu.unload(pdfBaseUrl + 'content/PdfjsChromeUtils.jsm');
 }
 
 function install(aData, aReason) {
+  // TODO remove after some time -- cleanup of unused preferences
+  Services.prefs.clearUserPref(EXT_PREFIX + '.database');
 }
 
 function uninstall(aData, aReason) {
-  setStringPref(EXT_PREFIX + '.database', '{}');
 }
-

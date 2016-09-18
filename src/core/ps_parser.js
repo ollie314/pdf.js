@@ -1,5 +1,3 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
 /* Copyright 2014 Mozilla Foundation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,9 +12,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-/* globals EOF, error, Lexer */
 
 'use strict';
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    define('pdfjs/core/ps_parser', ['exports', 'pdfjs/shared/util',
+      'pdfjs/core/parser'], factory);
+  } else if (typeof exports !== 'undefined') {
+    factory(exports, require('../shared/util.js'), require('./parser.js'));
+  } else {
+    factory((root.pdfjsCorePsParser = {}), root.pdfjsSharedUtil,
+      root.pdfjsCoreParser);
+  }
+}(this, function (exports, sharedUtil, coreParser) {
+
+var error = sharedUtil.error;
+var isSpace = sharedUtil.isSpace;
+var EOF = coreParser.EOF;
 
 var PostScriptParser = (function PostScriptParserClosure() {
   function PostScriptParser(lexer) {
@@ -31,7 +44,7 @@ var PostScriptParser = (function PostScriptParserClosure() {
       this.token = this.lexer.getToken();
     },
     accept: function PostScriptParser_accept(type) {
-      if (this.token.type == type) {
+      if (this.token.type === type) {
         this.nextToken();
         return true;
       }
@@ -113,7 +126,7 @@ var PostScriptToken = (function PostScriptTokenClosure() {
     this.value = value;
   }
 
-  var opCache = {};
+  var opCache = Object.create(null);
 
   PostScriptToken.getOperator = function PostScriptToken_getOperator(op) {
     var opValue = opCache[op];
@@ -137,13 +150,14 @@ var PostScriptLexer = (function PostScriptLexerClosure() {
   function PostScriptLexer(stream) {
     this.stream = stream;
     this.nextChar();
+
+    this.strBuf = [];
   }
   PostScriptLexer.prototype = {
     nextChar: function PostScriptLexer_nextChar() {
       return (this.currentChar = this.stream.getByte());
     },
     getToken: function PostScriptLexer_getToken() {
-      var s = '';
       var comment = false;
       var ch = this.currentChar;
 
@@ -157,9 +171,9 @@ var PostScriptLexer = (function PostScriptLexerClosure() {
           if (ch === 0x0A || ch === 0x0D) {
             comment = false;
           }
-        } else if (ch == 0x25) { // '%'
+        } else if (ch === 0x25) { // '%'
           comment = true;
-        } else if (!Lexer.isSpace(ch)) {
+        } else if (!isSpace(ch)) {
           break;
         }
         ch = this.nextChar();
@@ -178,11 +192,15 @@ var PostScriptLexer = (function PostScriptLexerClosure() {
           return PostScriptToken.RBRACE;
       }
       // operator
-      var str = String.fromCharCode(ch);
+      var strBuf = this.strBuf;
+      strBuf.length = 0;
+      strBuf[0] = String.fromCharCode(ch);
+
       while ((ch = this.nextChar()) >= 0 && // and 'A'-'Z', 'a'-'z'
              ((ch >= 0x41 && ch <= 0x5A) || (ch >= 0x61 && ch <= 0x7A))) {
-        str += String.fromCharCode(ch);
+        strBuf.push(String.fromCharCode(ch));
       }
+      var str = strBuf.join('');
       switch (str.toLowerCase()) {
         case 'if':
           return PostScriptToken.IF;
@@ -194,16 +212,19 @@ var PostScriptLexer = (function PostScriptLexerClosure() {
     },
     getNumber: function PostScriptLexer_getNumber() {
       var ch = this.currentChar;
-      var str = String.fromCharCode(ch);
+      var strBuf = this.strBuf;
+      strBuf.length = 0;
+      strBuf[0] = String.fromCharCode(ch);
+
       while ((ch = this.nextChar()) >= 0) {
         if ((ch >= 0x30 && ch <= 0x39) || // '0'-'9'
             ch === 0x2D || ch === 0x2E) { // '-', '.'
-          str += String.fromCharCode(ch);
+          strBuf.push(String.fromCharCode(ch));
         } else {
           break;
         }
       }
-      var value = parseFloat(str);
+      var value = parseFloat(strBuf.join(''));
       if (isNaN(value)) {
         error('Invalid floating point number: ' + value);
       }
@@ -212,3 +233,7 @@ var PostScriptLexer = (function PostScriptLexerClosure() {
   };
   return PostScriptLexer;
 })();
+
+exports.PostScriptLexer = PostScriptLexer;
+exports.PostScriptParser = PostScriptParser;
+}));

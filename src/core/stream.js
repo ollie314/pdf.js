@@ -1,5 +1,3 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
 /* Copyright 2012 Mozilla Foundation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,10 +12,38 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-/* globals bytesToString, ColorSpace, Dict, EOF, error, info, isArray,
-           Jbig2Image, JpegImage, JpxImage, Lexer, PDFJS, shadow, Util, warn */
 
 'use strict';
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    define('pdfjs/core/stream', ['exports', 'pdfjs/shared/util',
+      'pdfjs/core/primitives', 'pdfjs/core/jbig2', 'pdfjs/core/jpg',
+      'pdfjs/core/jpx'], factory);
+  } else if (typeof exports !== 'undefined') {
+    factory(exports, require('../shared/util.js'), require('./primitives.js'),
+      require('./jbig2.js'), require('./jpg.js'), require('./jpx.js'));
+  } else {
+    factory((root.pdfjsCoreStream = {}), root.pdfjsSharedUtil,
+      root.pdfjsCorePrimitives, root.pdfjsCoreJbig2, root.pdfjsCoreJpg,
+      root.pdfjsCoreJpx);
+  }
+}(this, function (exports, sharedUtil, corePrimitives, coreJbig2, coreJpg,
+                  coreJpx) {
+
+var Util = sharedUtil.Util;
+var error = sharedUtil.error;
+var info = sharedUtil.info;
+var isArray = sharedUtil.isArray;
+var createObjectURL = sharedUtil.createObjectURL;
+var shadow = sharedUtil.shadow;
+var warn = sharedUtil.warn;
+var isSpace = sharedUtil.isSpace;
+var Dict = corePrimitives.Dict;
+var isDict = corePrimitives.isDict;
+var Jbig2Image = coreJbig2.Jbig2Image;
+var JpegImage = coreJpg.JpegImage;
+var JpxImage = coreJpx.JpxImage;
 
 var Stream = (function StreamClosure() {
   function Stream(arrayBuffer, start, length, dict) {
@@ -35,6 +61,9 @@ var Stream = (function StreamClosure() {
     get length() {
       return this.end - this.start;
     },
+    get isEmpty() {
+      return this.length === 0;
+    },
     getByte: function Stream_getByte() {
       if (this.pos >= this.end) {
         return -1;
@@ -44,9 +73,12 @@ var Stream = (function StreamClosure() {
     getUint16: function Stream_getUint16() {
       var b0 = this.getByte();
       var b1 = this.getByte();
+      if (b0 === -1 || b1 === -1) {
+        return -1;
+      }
       return (b0 << 8) + b1;
     },
-    getUint32: function Stream_getUint32() {
+    getInt32: function Stream_getInt32() {
       var b0 = this.getByte();
       var b1 = this.getByte();
       var b2 = this.getByte();
@@ -69,6 +101,11 @@ var Stream = (function StreamClosure() {
       }
       this.pos = end;
       return bytes.subarray(pos, end);
+    },
+    peekByte: function Stream_peekByte() {
+      var peekedByte = this.getByte();
+      this.pos--;
+      return peekedByte;
     },
     peekBytes: function Stream_peekBytes(length) {
       var bytes = this.getBytes(length);
@@ -113,11 +150,17 @@ var StringStream = (function StringStreamClosure() {
 
 // super class for the decoding streams
 var DecodeStream = (function DecodeStreamClosure() {
+  // Lots of DecodeStreams are created whose buffers are never used.  For these
+  // we share a single empty buffer. This is (a) space-efficient and (b) avoids
+  // having special cases that would be required if we used |null| for an empty
+  // buffer.
+  var emptyBuffer = new Uint8Array(0);
+
   function DecodeStream(maybeMinBufferLength) {
     this.pos = 0;
     this.bufferLength = 0;
     this.eof = false;
-    this.buffer = null;
+    this.buffer = emptyBuffer;
     this.minBufferLength = 512;
     if (maybeMinBufferLength) {
       // Compute the first power of two that is as big as maybeMinBufferLength.
@@ -128,25 +171,23 @@ var DecodeStream = (function DecodeStreamClosure() {
   }
 
   DecodeStream.prototype = {
+    get isEmpty() {
+      while (!this.eof && this.bufferLength === 0) {
+        this.readBlock();
+      }
+      return this.bufferLength === 0;
+    },
     ensureBuffer: function DecodeStream_ensureBuffer(requested) {
       var buffer = this.buffer;
-      var current;
-      if (buffer) {
-        current = buffer.byteLength;
-        if (requested <= current) {
-          return buffer;
-        }
-      } else {
-        current = 0;
+      if (requested <= buffer.byteLength) {
+        return buffer;
       }
       var size = this.minBufferLength;
       while (size < requested) {
         size *= 2;
       }
       var buffer2 = new Uint8Array(size);
-      for (var i = 0; i < current; ++i) {
-        buffer2[i] = buffer[i];
-      }
+      buffer2.set(buffer);
       return (this.buffer = buffer2);
     },
     getByte: function DecodeStream_getByte() {
@@ -162,9 +203,12 @@ var DecodeStream = (function DecodeStreamClosure() {
     getUint16: function DecodeStream_getUint16() {
       var b0 = this.getByte();
       var b1 = this.getByte();
+      if (b0 === -1 || b1 === -1) {
+        return -1;
+      }
       return (b0 << 8) + b1;
     },
-    getUint32: function DecodeStream_getUint32() {
+    getInt32: function DecodeStream_getInt32() {
       var b0 = this.getByte();
       var b1 = this.getByte();
       var b2 = this.getByte();
@@ -190,16 +234,15 @@ var DecodeStream = (function DecodeStreamClosure() {
           this.readBlock();
         }
         end = this.bufferLength;
-
-        // checking if bufferLength is still 0 then
-        // the buffer has to be initialized
-        if (!end) {
-          this.buffer = new Uint8Array(0);
-        }
       }
 
       this.pos = end;
       return this.buffer.subarray(pos, end);
+    },
+    peekByte: function DecodeStream_peekByte() {
+      var peekedByte = this.getByte();
+      this.pos--;
+      return peekedByte;
     },
     peekBytes: function DecodeStream_peekBytes(length) {
       var bytes = this.getBytes(length);
@@ -213,7 +256,7 @@ var DecodeStream = (function DecodeStreamClosure() {
       }
       return new Stream(this.buffer, start, length, dict);
     },
-    skip: function Stream_skip(n) {
+    skip: function DecodeStream_skip(n) {
       if (!n) {
         n = 1;
       }
@@ -265,7 +308,7 @@ var StreamsSequenceStream = (function StreamsSequenceStreamClosure() {
     for (var i = 0, ii = this.streams.length; i < ii; i++) {
       var stream = this.streams[i];
       if (stream.getBaseStreams) {
-        Util.concatenateToArray(baseStreams, stream.getBaseStreams());
+        Util.appendToArray(baseStreams, stream.getBaseStreams());
       }
     }
     return baseStreams;
@@ -275,25 +318,25 @@ var StreamsSequenceStream = (function StreamsSequenceStreamClosure() {
 })();
 
 var FlateStream = (function FlateStreamClosure() {
-  var codeLenCodeMap = new Uint32Array([
+  var codeLenCodeMap = new Int32Array([
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
   ]);
 
-  var lengthDecode = new Uint32Array([
+  var lengthDecode = new Int32Array([
     0x00003, 0x00004, 0x00005, 0x00006, 0x00007, 0x00008, 0x00009, 0x0000a,
     0x1000b, 0x1000d, 0x1000f, 0x10011, 0x20013, 0x20017, 0x2001b, 0x2001f,
     0x30023, 0x3002b, 0x30033, 0x3003b, 0x40043, 0x40053, 0x40063, 0x40073,
     0x50083, 0x500a3, 0x500c3, 0x500e3, 0x00102, 0x00102, 0x00102
   ]);
 
-  var distDecode = new Uint32Array([
+  var distDecode = new Int32Array([
     0x00001, 0x00002, 0x00003, 0x00004, 0x10005, 0x10007, 0x20009, 0x2000d,
     0x30011, 0x30019, 0x40021, 0x40031, 0x50041, 0x50061, 0x60081, 0x600c1,
     0x70101, 0x70181, 0x80201, 0x80301, 0x90401, 0x90601, 0xa0801, 0xa0c01,
     0xb1001, 0xb1801, 0xc2001, 0xc3001, 0xd4001, 0xd6001
   ]);
 
-  var fixedLitCodeTab = [new Uint32Array([
+  var fixedLitCodeTab = [new Int32Array([
     0x70100, 0x80050, 0x80010, 0x80118, 0x70110, 0x80070, 0x80030, 0x900c0,
     0x70108, 0x80060, 0x80020, 0x900a0, 0x80000, 0x80080, 0x80040, 0x900e0,
     0x70104, 0x80058, 0x80018, 0x90090, 0x70114, 0x80078, 0x80038, 0x900d0,
@@ -360,7 +403,7 @@ var FlateStream = (function FlateStreamClosure() {
     0x7010f, 0x8006f, 0x8002f, 0x900bf, 0x8000f, 0x8008f, 0x8004f, 0x900ff
   ]), 9];
 
-  var fixedDistCodeTab = [new Uint32Array([
+  var fixedDistCodeTab = [new Int32Array([
     0x50000, 0x50010, 0x50008, 0x50018, 0x50004, 0x50014, 0x5000c, 0x5001c,
     0x50002, 0x50012, 0x5000a, 0x5001a, 0x50006, 0x50016, 0x5000e, 0x00000,
     0x50001, 0x50011, 0x50009, 0x50019, 0x50005, 0x50015, 0x5000d, 0x5001d,
@@ -373,10 +416,10 @@ var FlateStream = (function FlateStreamClosure() {
 
     var cmf = str.getByte();
     var flg = str.getByte();
-    if (cmf == -1 || flg == -1) {
+    if (cmf === -1 || flg === -1) {
       error('Invalid header in flate stream: ' + cmf + ', ' + flg);
     }
-    if ((cmf & 0x0f) != 0x08) {
+    if ((cmf & 0x0f) !== 0x08) {
       error('Unknown compression method in flate stream: ' + cmf + ', ' + flg);
     }
     if ((((cmf << 8) + flg) % 31) !== 0) {
@@ -421,10 +464,12 @@ var FlateStream = (function FlateStreamClosure() {
     var codeSize = this.codeSize;
     var codeBuf = this.codeBuf;
 
+    var b;
     while (codeSize < maxLen) {
-      var b;
       if ((b = str.getByte()) === -1) {
-        error('Bad encoding in flate stream');
+        // premature end of stream. code might however still be valid.
+        // codeSize < codeLen check below guards against incomplete codeVal.
+        break;
       }
       codeBuf |= (b << codeSize);
       codeSize += 8;
@@ -432,7 +477,7 @@ var FlateStream = (function FlateStreamClosure() {
     var code = codes[codeBuf & ((1 << maxLen) - 1)];
     var codeLen = code >> 16;
     var codeVal = code & 0xffff;
-    if (codeSize === 0 || codeSize < codeLen || codeLen === 0) {
+    if (codeLen < 1 || codeSize < codeLen) {
       error('Bad encoding in flate stream');
     }
     this.codeBuf = (codeBuf >> codeLen);
@@ -441,12 +486,13 @@ var FlateStream = (function FlateStreamClosure() {
   };
 
   FlateStream.prototype.generateHuffmanTable =
-    function flateStreamGenerateHuffmanTable(lengths) {
+      function flateStreamGenerateHuffmanTable(lengths) {
     var n = lengths.length;
 
     // find max code length
     var maxLen = 0;
-    for (var i = 0; i < n; ++i) {
+    var i;
+    for (i = 0; i < n; ++i) {
       if (lengths[i] > maxLen) {
         maxLen = lengths[i];
       }
@@ -454,22 +500,22 @@ var FlateStream = (function FlateStreamClosure() {
 
     // build the table
     var size = 1 << maxLen;
-    var codes = new Uint32Array(size);
+    var codes = new Int32Array(size);
     for (var len = 1, code = 0, skip = 2;
          len <= maxLen;
          ++len, code <<= 1, skip <<= 1) {
       for (var val = 0; val < n; ++val) {
-        if (lengths[val] == len) {
+        if (lengths[val] === len) {
           // bit-reverse the code
           var code2 = 0;
           var t = code;
-          for (var i = 0; i < len; ++i) {
+          for (i = 0; i < len; ++i) {
             code2 = (code2 << 1) | (t & 1);
             t >>= 1;
           }
 
           // fill the table entries
-          for (var i = code2; i < size; i += skip) {
+          for (i = code2; i < size; i += skip) {
             codes[i] = (len << 16) | val;
           }
           ++code;
@@ -481,6 +527,7 @@ var FlateStream = (function FlateStreamClosure() {
   };
 
   FlateStream.prototype.readBlock = function FlateStream_readBlock() {
+    var buffer, len;
     var str = this.str;
     // read block header
     var hdr = this.getBits(3);
@@ -508,7 +555,7 @@ var FlateStream = (function FlateStreamClosure() {
         error('Bad block header in flate stream');
       }
       check |= (b << 8);
-      if (check != (~blockLen & 0xffff) &&
+      if (check !== (~blockLen & 0xffff) &&
           (blockLen !== 0 || check !== 0)) {
         // Ignoring error for bad "empty" block (see issue 1277)
         error('Bad uncompressed block length in flate stream');
@@ -518,11 +565,11 @@ var FlateStream = (function FlateStreamClosure() {
       this.codeSize = 0;
 
       var bufferLength = this.bufferLength;
-      var buffer = this.ensureBuffer(bufferLength + blockLen);
+      buffer = this.ensureBuffer(bufferLength + blockLen);
       var end = bufferLength + blockLen;
       this.bufferLength = end;
       if (blockLen === 0) {
-        if (str.peekBytes(1).length === 0) {
+        if (str.peekByte() === -1) {
           this.eof = true;
         }
       } else {
@@ -539,10 +586,10 @@ var FlateStream = (function FlateStreamClosure() {
 
     var litCodeTable;
     var distCodeTable;
-    if (hdr == 1) { // compressed block, fixed codes
+    if (hdr === 1) { // compressed block, fixed codes
       litCodeTable = fixedLitCodeTab;
       distCodeTable = fixedDistCodeTab;
-    } else if (hdr == 2) { // compressed block, dynamic codes
+    } else if (hdr === 2) { // compressed block, dynamic codes
       var numLitCodes = this.getBits(5) + 257;
       var numDistCodes = this.getBits(5) + 1;
       var numCodeLenCodes = this.getBits(4) + 4;
@@ -550,24 +597,26 @@ var FlateStream = (function FlateStreamClosure() {
       // build the code lengths code table
       var codeLenCodeLengths = new Uint8Array(codeLenCodeMap.length);
 
-      for (var i = 0; i < numCodeLenCodes; ++i) {
+      var i;
+      for (i = 0; i < numCodeLenCodes; ++i) {
         codeLenCodeLengths[codeLenCodeMap[i]] = this.getBits(3);
       }
       var codeLenCodeTab = this.generateHuffmanTable(codeLenCodeLengths);
 
       // build the literal and distance code tables
-      var len = 0;
-      var i = 0;
+      len = 0;
+      i = 0;
       var codes = numLitCodes + numDistCodes;
       var codeLengths = new Uint8Array(codes);
+      var bitsLength, bitsOffset, what;
       while (i < codes) {
         var code = this.getCode(codeLenCodeTab);
-        if (code == 16) {
-          var bitsLength = 2, bitsOffset = 3, what = len;
-        } else if (code == 17) {
-          var bitsLength = 3, bitsOffset = 3, what = (len = 0);
-        } else if (code == 18) {
-          var bitsLength = 7, bitsOffset = 11, what = (len = 0);
+        if (code === 16) {
+          bitsLength = 2; bitsOffset = 3; what = len;
+        } else if (code === 17) {
+          bitsLength = 3; bitsOffset = 3; what = (len = 0);
+        } else if (code === 18) {
+          bitsLength = 7; bitsOffset = 11; what = (len = 0);
         } else {
           codeLengths[i++] = len = code;
           continue;
@@ -587,7 +636,7 @@ var FlateStream = (function FlateStreamClosure() {
       error('Unknown block type in flate stream');
     }
 
-    var buffer = this.buffer;
+    buffer = this.buffer;
     var limit = buffer ? buffer.length : 0;
     var pos = this.bufferLength;
     while (true) {
@@ -600,7 +649,7 @@ var FlateStream = (function FlateStreamClosure() {
         buffer[pos++] = code1;
         continue;
       }
-      if (code1 == 256) {
+      if (code1 === 256) {
         this.bufferLength = pos;
         return;
       }
@@ -610,7 +659,7 @@ var FlateStream = (function FlateStreamClosure() {
       if (code2 > 0) {
         code2 = this.getBits(code2);
       }
-      var len = (code1 & 0xffff) + code2;
+      len = (code1 & 0xffff) + code2;
       code1 = this.getCode(distCodeTable);
       code1 = distDecode[code1];
       code2 = code1 >> 16;
@@ -633,6 +682,9 @@ var FlateStream = (function FlateStreamClosure() {
 
 var PredictorStream = (function PredictorStreamClosure() {
   function PredictorStream(str, maybeLength, params) {
+    if (!isDict(params)) {
+      return str; // no prediction
+    }
     var predictor = this.predictor = params.get('Predictor') || 1;
 
     if (predictor <= 1) {
@@ -683,9 +735,10 @@ var PredictorStream = (function PredictorStreamClosure() {
     var inbuf = 0, outbuf = 0;
     var inbits = 0, outbits = 0;
     var pos = bufferLength;
+    var i;
 
     if (bits === 1) {
-      for (var i = 0; i < rowBytes; ++i) {
+      for (i = 0; i < rowBytes; ++i) {
         var c = rawBytes[i];
         inbuf = (inbuf << 8) | c;
         // bitwise addition is exclusive or
@@ -695,7 +748,7 @@ var PredictorStream = (function PredictorStreamClosure() {
         inbuf &= 0xFFFF;
       }
     } else if (bits === 8) {
-      for (var i = 0; i < colors; ++i) {
+      for (i = 0; i < colors; ++i) {
         buffer[pos++] = rawBytes[i];
       }
       for (; i < rowBytes; ++i) {
@@ -707,7 +760,7 @@ var PredictorStream = (function PredictorStreamClosure() {
       var bitMask = (1 << bits) - 1;
       var j = 0, k = bufferLength;
       var columns = this.columns;
-      for (var i = 0; i < columns; ++i) {
+      for (i = 0; i < columns; ++i) {
         for (var kk = 0; kk < colors; ++kk) {
           if (inbits < bits) {
             inbuf = (inbuf << 8) | (rawBytes[j++] & 0xFF);
@@ -753,15 +806,15 @@ var PredictorStream = (function PredictorStreamClosure() {
       prevRow = new Uint8Array(rowBytes);
     }
 
-    var j = bufferLength;
+    var i, j = bufferLength, up, c;
     switch (predictor) {
       case 0:
-        for (var i = 0; i < rowBytes; ++i) {
+        for (i = 0; i < rowBytes; ++i) {
           buffer[j++] = rawBytes[i];
         }
         break;
       case 1:
-        for (var i = 0; i < pixBytes; ++i) {
+        for (i = 0; i < pixBytes; ++i) {
           buffer[j++] = rawBytes[i];
         }
         for (; i < rowBytes; ++i) {
@@ -770,12 +823,12 @@ var PredictorStream = (function PredictorStreamClosure() {
         }
         break;
       case 2:
-        for (var i = 0; i < rowBytes; ++i) {
+        for (i = 0; i < rowBytes; ++i) {
           buffer[j++] = (prevRow[i] + rawBytes[i]) & 0xFF;
         }
         break;
       case 3:
-        for (var i = 0; i < pixBytes; ++i) {
+        for (i = 0; i < pixBytes; ++i) {
           buffer[j++] = (prevRow[i] >> 1) + rawBytes[i];
         }
         for (; i < rowBytes; ++i) {
@@ -787,13 +840,13 @@ var PredictorStream = (function PredictorStreamClosure() {
       case 4:
         // we need to save the up left pixels values. the simplest way
         // is to create a new buffer
-        for (var i = 0; i < pixBytes; ++i) {
-          var up = prevRow[i];
-          var c = rawBytes[i];
+        for (i = 0; i < pixBytes; ++i) {
+          up = prevRow[i];
+          c = rawBytes[i];
           buffer[j++] = up + c;
         }
         for (; i < rowBytes; ++i) {
-          var up = prevRow[i];
+          up = prevRow[i];
           var upLeft = prevRow[i - pixBytes];
           var left = buffer[j - pixBytes];
           var p = left + up - upLeft;
@@ -811,7 +864,7 @@ var PredictorStream = (function PredictorStreamClosure() {
             pc = -pc;
           }
 
-          var c = rawBytes[i];
+          c = rawBytes[i];
           if (pa <= pb && pa <= pc) {
             buffer[j++] = left + c;
           } else if (pb <= pc) {
@@ -839,8 +892,15 @@ var PredictorStream = (function PredictorStreamClosure() {
  */
 var JpegStream = (function JpegStreamClosure() {
   function JpegStream(stream, maybeLength, dict, xref) {
-    // TODO: per poppler, some images may have 'junk' before that
-    // need to be removed
+    // Some images may contain 'junk' before the SOI (start-of-image) marker.
+    // Note: this seems to mainly affect inline images.
+    var ch;
+    while ((ch = stream.getByte()) !== -1) {
+      if (ch === 0xFF) { // Find the first byte of the SOI marker (0xFFD8).
+        stream.skip(-1); // Reset the stream position to the SOI.
+        break;
+      }
+    }
     this.stream = stream;
     this.maybeLength = maybeLength;
     this.dict = dict;
@@ -862,42 +922,43 @@ var JpegStream = (function JpegStreamClosure() {
     if (this.bufferLength) {
       return;
     }
-    try {
-      var jpegImage = new JpegImage();
-      if (this.colorTransform != -1) {
-        jpegImage.colorTransform = this.colorTransform;
+    var jpegImage = new JpegImage();
+
+    // Checking if values need to be transformed before conversion.
+    if (this.forceRGB && this.dict && isArray(this.dict.get('Decode'))) {
+      var decodeArr = this.dict.getArray('Decode');
+      var bitsPerComponent = this.dict.get('BitsPerComponent') || 8;
+      var decodeArrLength = decodeArr.length;
+      var transform = new Int32Array(decodeArrLength);
+      var transformNeeded = false;
+      var maxValue = (1 << bitsPerComponent) - 1;
+      for (var i = 0; i < decodeArrLength; i += 2) {
+        transform[i] = ((decodeArr[i + 1] - decodeArr[i]) * 256) | 0;
+        transform[i + 1] = (decodeArr[i] * maxValue) | 0;
+        if (transform[i] !== 256 || transform[i + 1] !== 0) {
+          transformNeeded = true;
+        }
       }
-      jpegImage.parse(this.bytes);
-      var width = jpegImage.width;
-      var height = jpegImage.height;
-      var data = jpegImage.getData(width, height);
-      this.buffer = data;
-      this.bufferLength = data.length;
-      this.eof = true;
-    } catch (e) {
-      error('JPEG error: ' + e);
+      if (transformNeeded) {
+        jpegImage.decodeTransform = transform;
+      }
     }
+
+    jpegImage.parse(this.bytes);
+    var data = jpegImage.getData(this.drawWidth, this.drawHeight,
+                                 this.forceRGB);
+    this.buffer = data;
+    this.bufferLength = data.length;
+    this.eof = true;
   };
-  JpegStream.prototype.getIR = function JpegStream_getIR() {
-    return PDFJS.createObjectURL(this.bytes, 'image/jpeg');
+
+  JpegStream.prototype.getBytes = function JpegStream_getBytes(length) {
+    this.ensureBuffer();
+    return this.buffer;
   };
-  /**
-   * Checks if the image can be decoded and displayed by the browser without any
-   * further processing such as color space conversions.
-   */
-  JpegStream.prototype.isNativelySupported =
-      function JpegStream_isNativelySupported(xref, res) {
-    var cs = ColorSpace.parse(this.dict.get('ColorSpace', 'CS'), xref, res);
-    return cs.name === 'DeviceGray' || cs.name === 'DeviceRGB';
-  };
-  /**
-   * Checks if the image can be decoded by the browser.
-   */
-  JpegStream.prototype.isNativelyDecodable =
-      function JpegStream_isNativelyDecodable(xref, res) {
-    var cs = ColorSpace.parse(this.dict.get('ColorSpace', 'CS'), xref, res);
-    var numComps = cs.numComps;
-    return numComps == 1 || numComps == 3;
+
+  JpegStream.prototype.getIR = function JpegStream_getIR(forceDataSchema) {
+    return createObjectURL(this.bytes, 'image/jpeg', forceDataSchema);
   };
 
   return JpegStream;
@@ -937,77 +998,35 @@ var JpxStream = (function JpxStreamClosure() {
     var width = jpxImage.width;
     var height = jpxImage.height;
     var componentsCount = jpxImage.componentsCount;
-    if (componentsCount != 1 && componentsCount != 3 && componentsCount != 4) {
-      error('JPX with ' + componentsCount + ' components is not supported');
-    }
+    var tileCount = jpxImage.tiles.length;
+    if (tileCount === 1) {
+      this.buffer = jpxImage.tiles[0].items;
+    } else {
+      var data = new Uint8Array(width * height * componentsCount);
 
-    var data = new Uint8Array(width * height * componentsCount);
+      for (var k = 0; k < tileCount; k++) {
+        var tileComponents = jpxImage.tiles[k];
+        var tileWidth = tileComponents.width;
+        var tileHeight = tileComponents.height;
+        var tileLeft = tileComponents.left;
+        var tileTop = tileComponents.top;
 
-    for (var k = 0, kk = jpxImage.tiles.length; k < kk; k++) {
-      var tileCompoments = jpxImage.tiles[k];
-      var tileWidth = tileCompoments[0].width;
-      var tileHeight = tileCompoments[0].height;
-      var tileLeft = tileCompoments[0].left;
-      var tileTop = tileCompoments[0].top;
+        var src = tileComponents.items;
+        var srcPosition = 0;
+        var dataPosition = (width * tileTop + tileLeft) * componentsCount;
+        var imgRowSize = width * componentsCount;
+        var tileRowSize = tileWidth * componentsCount;
 
-      var dataPosition, sourcePosition, data0, data1, data2, data3, rowFeed;
-      switch (componentsCount) {
-        case 1:
-          data0 = tileCompoments[0].items;
-
-          dataPosition = width * tileTop + tileLeft;
-          rowFeed = width - tileWidth;
-          sourcePosition = 0;
-          for (var j = 0; j < tileHeight; j++) {
-            for (var i = 0; i < tileWidth; i++) {
-              data[dataPosition++] = data0[sourcePosition++];
-            }
-            dataPosition += rowFeed;
-          }
-          break;
-        case 3:
-          data0 = tileCompoments[0].items;
-          data1 = tileCompoments[1].items;
-          data2 = tileCompoments[2].items;
-
-          dataPosition = (width * tileTop + tileLeft) * 3;
-          rowFeed = (width - tileWidth) * 3;
-          sourcePosition = 0;
-          for (var j = 0; j < tileHeight; j++) {
-            for (var i = 0; i < tileWidth; i++) {
-              data[dataPosition++] = data0[sourcePosition];
-              data[dataPosition++] = data1[sourcePosition];
-              data[dataPosition++] = data2[sourcePosition];
-              sourcePosition++;
-            }
-            dataPosition += rowFeed;
-          }
-          break;
-        case 4:
-          data0 = tileCompoments[0].items;
-          data1 = tileCompoments[1].items;
-          data2 = tileCompoments[2].items;
-          data3 = tileCompoments[3].items;
-
-          dataPosition = (width * tileTop + tileLeft) * 4;
-          rowFeed = (width - tileWidth) * 4;
-          sourcePosition = 0;
-          for (var j = 0; j < tileHeight; j++) {
-            for (var i = 0; i < tileWidth; i++) {
-              data[dataPosition++] = data0[sourcePosition];
-              data[dataPosition++] = data1[sourcePosition];
-              data[dataPosition++] = data2[sourcePosition];
-              data[dataPosition++] = data3[sourcePosition];
-              sourcePosition++;
-            }
-            dataPosition += rowFeed;
-          }
-          break;
+        for (var j = 0; j < tileHeight; j++) {
+          var rowBytes = src.subarray(srcPosition, srcPosition + tileRowSize);
+          data.set(rowBytes, dataPosition);
+          srcPosition += tileRowSize;
+          dataPosition += imgRowSize;
+        }
       }
+      this.buffer = data;
     }
-
-    this.buffer = data;
-    this.bufferLength = data.length;
+    this.bufferLength = this.buffer.length;
     this.eof = true;
   };
 
@@ -1044,7 +1063,8 @@ var Jbig2Stream = (function Jbig2StreamClosure() {
 
     var jbig2Image = new Jbig2Image();
 
-    var chunks = [], decodeParams = this.dict.get('DecodeParms');
+    var chunks = [];
+    var decodeParams = this.dict.getArray('DecodeParms');
 
     // According to the PDF specification, DecodeParms can be either
     // a dictionary, or an array whose elements are dictionaries.
@@ -1146,7 +1166,7 @@ var Ascii85Stream = (function Ascii85StreamClosure() {
     var str = this.str;
 
     var c = str.getByte();
-    while (Lexer.isSpace(c)) {
+    while (isSpace(c)) {
       c = str.getByte();
     }
 
@@ -1156,26 +1176,27 @@ var Ascii85Stream = (function Ascii85StreamClosure() {
     }
 
     var bufferLength = this.bufferLength, buffer;
+    var i;
 
     // special code for z
-    if (c == Z_LOWER_CHAR) {
+    if (c === Z_LOWER_CHAR) {
       buffer = this.ensureBuffer(bufferLength + 4);
-      for (var i = 0; i < 4; ++i) {
+      for (i = 0; i < 4; ++i) {
         buffer[bufferLength + i] = 0;
       }
       this.bufferLength += 4;
     } else {
       var input = this.input;
       input[0] = c;
-      for (var i = 1; i < 5; ++i) {
+      for (i = 1; i < 5; ++i) {
         c = str.getByte();
-        while (Lexer.isSpace(c)) {
+        while (isSpace(c)) {
           c = str.getByte();
         }
 
         input[i] = c;
 
-        if (c === EOF || c == TILDA_CHAR) {
+        if (c === EOF || c === TILDA_CHAR) {
           break;
         }
       }
@@ -1190,11 +1211,11 @@ var Ascii85Stream = (function Ascii85StreamClosure() {
         this.eof = true;
       }
       var t = 0;
-      for (var i = 0; i < 5; ++i) {
+      for (i = 0; i < 5; ++i) {
         t = t * 85 + (input[i] - 0x21);
       }
 
-      for (var i = 3; i >= 0; --i) {
+      for (i = 3; i >= 0; --i) {
         buffer[bufferLength + i] = t & 0xFF;
         t >>= 8;
       }
@@ -1282,16 +1303,17 @@ var RunLengthStream = (function RunLengthStreamClosure() {
     // (in addition to the second byte from the header), n = 129 through 255 -
     // duplicate the second byte from the header (257 - n) times, n = 128 - end.
     var repeatHeader = this.str.getBytes(2);
-    if (!repeatHeader || repeatHeader.length < 2 || repeatHeader[0] == 128) {
+    if (!repeatHeader || repeatHeader.length < 2 || repeatHeader[0] === 128) {
       this.eof = true;
       return;
     }
 
+    var buffer;
     var bufferLength = this.bufferLength;
     var n = repeatHeader[0];
     if (n < 128) {
       // copy n bytes
-      var buffer = this.ensureBuffer(bufferLength + n + 1);
+      buffer = this.ensureBuffer(bufferLength + n + 1);
       buffer[bufferLength++] = repeatHeader[1];
       if (n > 0) {
         var source = this.str.getBytes(n);
@@ -1301,7 +1323,7 @@ var RunLengthStream = (function RunLengthStreamClosure() {
     } else {
       n = 257 - n;
       var b = repeatHeader[1];
-      var buffer = this.ensureBuffer(bufferLength + n + 1);
+      buffer = this.ensureBuffer(bufferLength + n + 1);
       for (var i = 0; i < n; i++) {
         buffer[bufferLength++] = b;
       }
@@ -1315,6 +1337,7 @@ var RunLengthStream = (function RunLengthStreamClosure() {
 var CCITTFaxStream = (function CCITTFaxStreamClosure() {
 
   var ccittEOL = -2;
+  var ccittEOF = -1;
   var twoDimPass = 0;
   var twoDimHoriz = 1;
   var twoDimVert0 = 2;
@@ -1744,7 +1767,7 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
     this.str = str;
     this.dict = str.dict;
 
-    params = params || new Dict();
+    params = params || Dict.empty;
 
     this.encoding = params.get('K') || 0;
     this.eoline = params.get('EndOfLine') || false;
@@ -1774,7 +1797,7 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
     while ((code1 = this.lookBits(12)) === 0) {
       this.eatBits(1);
     }
-    if (code1 == 1) {
+    if (code1 === 1) {
       this.eatBits(12);
     }
     if (this.encoding > 0) {
@@ -1851,7 +1874,7 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
     var codingLine = this.codingLine;
     var columns = this.columns;
 
-    var refPos, blackPixels, bits;
+    var refPos, blackPixels, bits, i;
 
     if (this.outputBits === 0) {
       if (this.eof) {
@@ -1861,7 +1884,7 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
 
       var code1, code2, code3;
       if (this.nextLine2D) {
-        for (var i = 0; codingLine[i] < columns; ++i) {
+        for (i = 0; codingLine[i] < columns; ++i) {
           refLine[i] = codingLine[i];
         }
         refLine[i++] = columns;
@@ -1997,7 +2020,7 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
                 }
               }
               break;
-            case EOF:
+            case ccittEOF:
               this.addPixels(columns, 0);
               this.eof = true;
               break;
@@ -2027,24 +2050,31 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
         }
       }
 
+      var gotEOL = false;
+
       if (this.byteAlign) {
         this.inputBits &= ~7;
       }
 
-      var gotEOL = false;
-
-      if (!this.eoblock && this.row == this.rows - 1) {
+      if (!this.eoblock && this.row === this.rows - 1) {
         this.eof = true;
       } else {
         code1 = this.lookBits(12);
-        while (code1 === 0) {
-          this.eatBits(1);
-          code1 = this.lookBits(12);
+        if (this.eoline) {
+          while (code1 !== ccittEOF && code1 !== 1) {
+            this.eatBits(1);
+            code1 = this.lookBits(12);
+          }
+        } else {
+          while (code1 === 0) {
+            this.eatBits(1);
+            code1 = this.lookBits(12);
+          }
         }
-        if (code1 == 1) {
+        if (code1 === 1) {
           this.eatBits(12);
           gotEOL = true;
-        } else if (code1 == EOF) {
+        } else if (code1 === ccittEOF) {
           this.eof = true;
         }
       }
@@ -2054,18 +2084,18 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
         this.eatBits(1);
       }
 
-      if (this.eoblock && gotEOL) {
+      if (this.eoblock && gotEOL && this.byteAlign) {
         code1 = this.lookBits(12);
-        if (code1 == 1) {
+        if (code1 === 1) {
           this.eatBits(12);
           if (this.encoding > 0) {
             this.lookBits(1);
             this.eatBits(1);
           }
           if (this.encoding >= 0) {
-            for (var i = 0; i < 4; ++i) {
+            for (i = 0; i < 4; ++i) {
               code1 = this.lookBits(12);
-              if (code1 != 1) {
+              if (code1 !== 1) {
                 info('bad rtc code: ' + code1);
               }
               this.eatBits(12);
@@ -2080,11 +2110,11 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
       } else if (this.err && this.eoline) {
         while (true) {
           code1 = this.lookBits(13);
-          if (code1 == EOF) {
+          if (code1 === ccittEOF) {
             this.eof = true;
             return null;
           }
-          if ((code1 >> 1) == 1) {
+          if ((code1 >> 1) === 1) {
             break;
           }
           this.eatBits(1);
@@ -2114,7 +2144,7 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
                            codingLine[this.codingPos - 1]);
       }
     } else {
-      var bits = 8;
+      bits = 8;
       c = 0;
       do {
         if (this.outputBits > bits) {
@@ -2160,7 +2190,7 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
     var limitValue = limit || 0;
     for (var i = start; i <= end; ++i) {
       var code = this.lookBits(i);
-      if (code == EOF) {
+      if (code === ccittEOF) {
         return [true, 1, false];
       }
       if (i < end) {
@@ -2168,7 +2198,7 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
       }
       if (!limitValue || code >= limitValue) {
         var p = table[code - limitValue];
-        if (p[0] == i) {
+        if (p[0] === i) {
           this.eatBits(i);
           return [true, p[1], true];
         }
@@ -2196,7 +2226,7 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
       }
     }
     info('Bad two dim code');
-    return EOF;
+    return ccittEOF;
   };
 
   CCITTFaxStream.prototype.getWhiteCode =
@@ -2204,10 +2234,9 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
 
     var code = 0;
     var p;
-    var n;
     if (this.eoblock) {
       code = this.lookBits(12);
-      if (code == EOF) {
+      if (code === ccittEOF) {
         return 1;
       }
 
@@ -2243,7 +2272,7 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
     var code, p;
     if (this.eoblock) {
       code = this.lookBits(13);
-      if (code == EOF) {
+      if (code === ccittEOF) {
         return 1;
       }
       if ((code >> 7) === 0) {
@@ -2284,12 +2313,12 @@ var CCITTFaxStream = (function CCITTFaxStreamClosure() {
     while (this.inputBits < n) {
       if ((c = this.str.getByte()) === -1) {
         if (this.inputBits === 0) {
-          return EOF;
+          return ccittEOF;
         }
         return ((this.inputBuf << (n - this.inputBits)) &
                 (0xFFFF >> (16 - n)));
       }
-      this.inputBuf = (this.inputBuf << 8) + c;
+      this.inputBuf = (this.inputBuf << 8) | c;
       this.inputBits += 8;
     }
     return (this.inputBuf >> (this.inputBits - n)) & (0xFFFF >> (16 - n));
@@ -2391,7 +2420,7 @@ var LZWStream = (function LZWStreamClosure() {
         } else {
           currentSequence[currentSequenceLength++] = currentSequence[0];
         }
-      } else if (code == 256) {
+      } else if (code === 256) {
         codeLength = 9;
         nextCode = 258;
         currentSequenceLength = 0;
@@ -2444,3 +2473,21 @@ var NullStream = (function NullStreamClosure() {
 
   return NullStream;
 })();
+
+exports.Ascii85Stream = Ascii85Stream;
+exports.AsciiHexStream = AsciiHexStream;
+exports.CCITTFaxStream = CCITTFaxStream;
+exports.DecryptStream = DecryptStream;
+exports.DecodeStream = DecodeStream;
+exports.FlateStream = FlateStream;
+exports.Jbig2Stream = Jbig2Stream;
+exports.JpegStream = JpegStream;
+exports.JpxStream = JpxStream;
+exports.NullStream = NullStream;
+exports.PredictorStream = PredictorStream;
+exports.RunLengthStream = RunLengthStream;
+exports.Stream = Stream;
+exports.StreamsSequenceStream = StreamsSequenceStream;
+exports.StringStream = StringStream;
+exports.LZWStream = LZWStream;
+}));

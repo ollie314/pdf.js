@@ -1,5 +1,3 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
 /* Copyright 2012 Mozilla Foundation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,57 +12,44 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-/* globals PDFJS, VIEW_HISTORY_MEMORY, isLocalStorageEnabled, Promise */
 
 'use strict';
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    define('pdfjs-web/view_history', ['exports'], factory);
+  } else if (typeof exports !== 'undefined') {
+    factory(exports);
+  } else {
+    factory((root.pdfjsWebViewHistory = {}));
+  }
+}(this, function (exports) {
+
+var DEFAULT_VIEW_HISTORY_CACHE_SIZE = 20;
 
 /**
  * View History - This is a utility for saving various view parameters for
  *                recently opened files.
  *
  * The way that the view parameters are stored depends on how PDF.js is built,
- * for 'node make <flag>' the following cases exist:
- *  - FIREFOX or MOZCENTRAL - uses about:config.
- *  - B2G                   - uses asyncStorage.
+ * for 'gulp <flag>' the following cases exist:
+ *  - FIREFOX or MOZCENTRAL - uses sessionStorage.
  *  - GENERIC or CHROME     - uses localStorage, if it is available.
  */
 var ViewHistory = (function ViewHistoryClosure() {
-  function ViewHistory(fingerprint) {
+  function ViewHistory(fingerprint, cacheSize) {
     this.fingerprint = fingerprint;
-    var initializedPromiseResolve;
+    this.cacheSize = cacheSize || DEFAULT_VIEW_HISTORY_CACHE_SIZE;
     this.isInitializedPromiseResolved = false;
-    this.initializedPromise = new Promise(function (resolve) {
-      initializedPromiseResolve = resolve;
-    });
-
-    var resolvePromise = (function ViewHistoryResolvePromise(db) {
+    this.initializedPromise =
+        this._readFromStorage().then(function (databaseStr) {
       this.isInitializedPromiseResolved = true;
-      this.initialize(db || '{}');
-      initializedPromiseResolve();
-    }).bind(this);
 
-//#if B2G
-//  asyncStorage.getItem('database', resolvePromise);
-//#endif
-
-//#if FIREFOX || MOZCENTRAL
-//  resolvePromise(FirefoxCom.requestSync('getDatabase', null));
-//#endif
-
-//#if !(FIREFOX || MOZCENTRAL || B2G)
-    if (isLocalStorageEnabled) {
-      resolvePromise(localStorage.getItem('database'));
-    }
-//#endif
-  }
-
-  ViewHistory.prototype = {
-    initialize: function ViewHistory_initialize(database) {
-      database = JSON.parse(database);
+      var database = JSON.parse(databaseStr || '{}');
       if (!('files' in database)) {
         database.files = [];
       }
-      if (database.files.length >= VIEW_HISTORY_MEMORY) {
+      if (database.files.length >= this.cacheSize) {
         database.files.shift();
       }
       var index;
@@ -80,29 +65,54 @@ var ViewHistory = (function ViewHistoryClosure() {
       }
       this.file = database.files[index];
       this.database = database;
+    }.bind(this));
+  }
+
+  ViewHistory.prototype = {
+    _writeToStorage: function ViewHistory_writeToStorage() {
+      return new Promise(function (resolve) {
+        var databaseStr = JSON.stringify(this.database);
+
+//#if FIREFOX || MOZCENTRAL
+//      sessionStorage.setItem('pdfjsHistory', databaseStr);
+//      resolve();
+//#endif
+
+//#if !(FIREFOX || MOZCENTRAL)
+        localStorage.setItem('database', databaseStr);
+        resolve();
+//#endif
+      }.bind(this));
+    },
+
+    _readFromStorage: function ViewHistory_readFromStorage() {
+      return new Promise(function (resolve) {
+//#if FIREFOX || MOZCENTRAL
+//      resolve(sessionStorage.getItem('pdfjsHistory'));
+//#endif
+
+//#if !(FIREFOX || MOZCENTRAL)
+        resolve(localStorage.getItem('database'));
+//#endif
+      });
     },
 
     set: function ViewHistory_set(name, val) {
       if (!this.isInitializedPromiseResolved) {
         return;
       }
-      var file = this.file;
-      file[name] = val;
-      var database = JSON.stringify(this.database);
+      this.file[name] = val;
+      return this._writeToStorage();
+    },
 
-//#if B2G
-//    asyncStorage.setItem('database', database);
-//#endif
-
-//#if FIREFOX || MOZCENTRAL
-//    FirefoxCom.requestSync('setDatabase', database);
-//#endif
-
-//#if !(FIREFOX || MOZCENTRAL || B2G)
-      if (isLocalStorageEnabled) {
-        localStorage.setItem('database', database);
+    setMultiple: function ViewHistory_setMultiple(properties) {
+      if (!this.isInitializedPromiseResolved) {
+        return;
       }
-//#endif
+      for (var name in properties) {
+        this.file[name] = properties[name];
+      }
+      return this._writeToStorage();
     },
 
     get: function ViewHistory_get(name, defaultValue) {
@@ -115,3 +125,6 @@ var ViewHistory = (function ViewHistoryClosure() {
 
   return ViewHistory;
 })();
+
+exports.ViewHistory = ViewHistory;
+}));

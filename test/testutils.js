@@ -1,5 +1,3 @@
-/* -*- Mode: js; js-indent-level: 2; indent-tabs-mode: nil; tab-width: 2 -*- */
-/* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
 /*
  * Copyright 2014 Mozilla Foundation
  *
@@ -21,19 +19,13 @@
 
 var fs = require('fs');
 var path = require('path');
+var rimrafSync = require('rimraf').sync;
 
 exports.removeDirSync = function removeDirSync(dir) {
-  var files = fs.readdirSync(dir);
-  files.forEach(function (filename) {
-    var file = path.join(dir, filename);
-    var stats = fs.statSync(file);
-    if (stats.isDirectory()) {
-      removeDirSync(file);
-    } else {
-      fs.unlinkSync(file);
-    }
+  fs.readdirSync(dir); // Will throw if dir is not a directory
+  rimrafSync(dir, {
+    disableGlob: true,
   });
-  fs.rmdirSync(dir);
 };
 
 exports.copySubtreeSync = function copySubtreeSync(src, dest) {
@@ -75,14 +67,15 @@ var stdinBuffer = '', endOfStdin = false, stdinInitialized = false;
 var stdinOnLineCallbacks = [];
 
 function handleStdinBuffer() {
+  var callback;
   if (endOfStdin) {
     if (stdinBuffer && stdinOnLineCallbacks.length > 0) {
-      var callback = stdinOnLineCallbacks.shift();
+      callback = stdinOnLineCallbacks.shift();
       callback(stdinBuffer);
       stdinBuffer = null;
     }
     while (stdinOnLineCallbacks.length > 0) {
-      var callback = stdinOnLineCallbacks.shift();
+      callback = stdinOnLineCallbacks.shift();
       callback();
     }
     return;
@@ -92,7 +85,7 @@ function handleStdinBuffer() {
     if (i < 0) {
       return;
     }
-    var callback = stdinOnLineCallbacks.shift();
+    callback = stdinOnLineCallbacks.shift();
     var result = stdinBuffer.substring(0, i + 1);
     stdinBuffer = stdinBuffer.substring(i + 1);
     callback(result);

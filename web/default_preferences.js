@@ -1,5 +1,3 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
 /* Copyright 2013 Mozilla Foundation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,12 +12,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-/* globals */
 
 'use strict';
 
-var DEFAULT_PREFERENCES = {
-  showPreviousViewOnLoad: true,
-  defaultZoomValue: '',
-  ifAvailableShowOutlineOnLoad: false
-};
+var DEFAULT_PREFERENCES;
+
+(function defaultPreferencesLoaderWrapper() {
+  function loaded() {
+    try {
+      DEFAULT_PREFERENCES = JSON.parse(xhr.responseText);
+    } catch (e) {
+      console.error('Unable to load DEFAULT_PREFERENCES: ' + e);
+      DEFAULT_PREFERENCES = {};
+    }
+    var event = document.createEvent('CustomEvent');
+    event.initCustomEvent('defaultpreferencesloaded', true, true, null);
+    document.dispatchEvent(event);
+  }
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', 'default_preferences.json');
+  xhr.onload = xhr.onerror = loaded;
+  xhr.send();
+})();

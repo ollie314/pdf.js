@@ -1,5 +1,3 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
 /* Copyright 2012 Mozilla Foundation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,10 +12,36 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-/* globals Util, isString, isInt, warn, error, isCmd, isEOF, isName, Lexer,
-           isStream, StringStream, PDFJS, assert */
 
 'use strict';
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    define('pdfjs/core/cmap', ['exports', 'pdfjs/shared/util',
+      'pdfjs/core/primitives', 'pdfjs/core/stream', 'pdfjs/core/parser'],
+      factory);
+  } else if (typeof exports !== 'undefined') {
+    factory(exports, require('../shared/util.js'), require('./primitives.js'),
+      require('./stream.js'), require('./parser.js'));
+  } else {
+    factory((root.pdfjsCoreCMap = {}), root.pdfjsSharedUtil,
+      root.pdfjsCorePrimitives, root.pdfjsCoreStream, root.pdfjsCoreParser);
+  }
+}(this, function (exports, sharedUtil, corePrimitives, coreStream, coreParser) {
+
+var Util = sharedUtil.Util;
+var assert = sharedUtil.assert;
+var warn = sharedUtil.warn;
+var error = sharedUtil.error;
+var isInt = sharedUtil.isInt;
+var isString = sharedUtil.isString;
+var MissingDataException = sharedUtil.MissingDataException;
+var isName = corePrimitives.isName;
+var isCmd = corePrimitives.isCmd;
+var isStream = corePrimitives.isStream;
+var StringStream = coreStream.StringStream;
+var Lexer = coreParser.Lexer;
+var isEOF = coreParser.isEOF;
 
 var BUILT_IN_CMAPS = [
 // << Start unicode maps.
@@ -199,7 +223,12 @@ var CMap = (function CMapClosure() {
     // where nBytePairs are ranges e.g. [low1, high1, low2, high2, ...]
     this.codespaceRanges = [[], [], [], []];
     this.numCodespaceRanges = 0;
-    this.map = [];
+    // Map entries have one of two forms.
+    // - cid chars are 16-bit unsigned integers, stored as integers.
+    // - bf chars are variable-length byte sequences, stored as strings, with
+    //   one byte per character.
+    this._map = [];
+    this.name = '';
     this.vertical = false;
     this.useCMap = null;
     this.builtInCMap = builtInCMap;
@@ -210,34 +239,74 @@ var CMap = (function CMapClosure() {
       this.numCodespaceRanges++;
     },
 
-    mapRange: function(low, high, dstLow) {
+    mapCidRange: function(low, high, dstLow) {
+      while (low <= high) {
+        this._map[low++] = dstLow++;
+      }
+    },
+
+    mapBfRange: function(low, high, dstLow) {
       var lastByte = dstLow.length - 1;
       while (low <= high) {
-        this.map[low] = dstLow;
+        this._map[low++] = dstLow;
         // Only the last byte has to be incremented.
         dstLow = dstLow.substr(0, lastByte) +
                  String.fromCharCode(dstLow.charCodeAt(lastByte) + 1);
+      }
+    },
+
+    mapBfRangeToArray: function(low, high, array) {
+      var i = 0, ii = array.length;
+      while (low <= high && i < ii) {
+        this._map[low] = array[i++];
         ++low;
       }
     },
 
-    mapRangeToArray: function(low, high, array) {
-      var i = 0;
-      while (low <= high) {
-        this.map[low] = array[i++];
-        ++low;
-      }
-    },
-
+    // This is used for both bf and cid chars.
     mapOne: function(src, dst) {
-      this.map[src] = dst;
+      this._map[src] = dst;
     },
 
     lookup: function(code) {
-      return this.map[code];
+      return this._map[code];
     },
 
-    readCharCode: function(str, offset) {
+    contains: function(code) {
+      return this._map[code] !== undefined;
+    },
+
+    forEach: function(callback) {
+      // Most maps have fewer than 65536 entries, and for those we use normal
+      // array iteration. But really sparse tables are possible -- e.g. with
+      // indices in the *billions*. For such tables we use for..in, which isn't
+      // ideal because it stringifies the indices for all present elements, but
+      // it does avoid iterating over every undefined entry.
+      var map = this._map;
+      var length = map.length;
+      var i;
+      if (length <= 0x10000) {
+        for (i = 0; i < length; i++) {
+          if (map[i] !== undefined) {
+            callback(i, map[i]);
+          }
+        }
+      } else {
+        for (i in this._map) {
+          callback(i, map[i]);
+        }
+      }
+    },
+
+    charCodeOf: function(value) {
+      return this._map.indexOf(value);
+    },
+
+    getMap: function() {
+      return this._map;
+    },
+
+    readCharCode: function(str, offset, out) {
       var c = 0;
       var codespaceRanges = this.codespaceRanges;
       var codespaceRangesLen = this.codespaceRanges.length;
@@ -251,57 +320,126 @@ var CMap = (function CMapClosure() {
           var low = codespaceRange[k++];
           var high = codespaceRange[k++];
           if (c >= low && c <= high) {
-            return [c, n + 1];
+            out.charcode = c;
+            out.length = n + 1;
+            return;
           }
         }
       }
+      out.charcode = 0;
+      out.length = 1;
+    },
 
-      return [0, 1];
+    get length() {
+      return this._map.length;
+    },
+
+    get isIdentityCMap() {
+      if (!(this.name === 'Identity-H' || this.name === 'Identity-V')) {
+        return false;
+      }
+      if (this._map.length !== 0x10000) {
+        return false;
+      }
+      for (var i = 0; i < 0x10000; i++) {
+        if (this._map[i] !== i) {
+          return false;
+        }
+      }
+      return true;
     }
-
   };
   return CMap;
 })();
 
+// A special case of CMap, where the _map array implicitly has a length of
+// 65536 and each element is equal to its index.
 var IdentityCMap = (function IdentityCMapClosure() {
   function IdentityCMap(vertical, n) {
     CMap.call(this);
     this.vertical = vertical;
     this.addCodespaceRange(n, 0, 0xffff);
-    this.mapRange(0, 0xffff, '\u0000');
   }
   Util.inherit(IdentityCMap, CMap, {});
+
+  IdentityCMap.prototype = {
+    addCodespaceRange: CMap.prototype.addCodespaceRange,
+
+    mapCidRange: function(low, high, dstLow) {
+      error('should not call mapCidRange');
+    },
+
+    mapBfRange: function(low, high, dstLow) {
+      error('should not call mapBfRange');
+    },
+
+    mapBfRangeToArray: function(low, high, array) {
+      error('should not call mapBfRangeToArray');
+    },
+
+    mapOne: function(src, dst) {
+      error('should not call mapCidOne');
+    },
+
+    lookup: function(code) {
+      return (isInt(code) && code <= 0xffff) ? code : undefined;
+    },
+
+    contains: function(code) {
+      return isInt(code) && code <= 0xffff;
+    },
+
+    forEach: function(callback) {
+      for (var i = 0; i <= 0xffff; i++) {
+        callback(i, i);
+      }
+    },
+
+    charCodeOf: function(value) {
+      return (isInt(value) && value <= 0xffff) ? value : -1;
+    },
+
+    getMap: function() {
+      // Sometimes identity maps must be instantiated, but it's rare.
+      var map = new Array(0x10000);
+      for (var i = 0; i <= 0xffff; i++) {
+        map[i] = i;
+      }
+      return map;
+    },
+
+    readCharCode: CMap.prototype.readCharCode,
+
+    get length() {
+      return 0x10000;
+    },
+
+    get isIdentityCMap() {
+      error('should not access .isIdentityCMap');
+    }
+  };
 
   return IdentityCMap;
 })();
 
 var BinaryCMapReader = (function BinaryCMapReaderClosure() {
   function fetchBinaryData(url) {
-    var nonBinaryRequest = PDFJS.disableWorker;
-    var request = new XMLHttpRequest();
-    request.open('GET', url, false);
-    if (!nonBinaryRequest) {
-      try {
-        request.responseType = 'arraybuffer';
-        nonBinaryRequest = request.responseType !== 'arraybuffer';
-      } catch (e) {
-        nonBinaryRequest = true;
-      }
-    }
-    if (nonBinaryRequest && request.overrideMimeType) {
-      request.overrideMimeType('text/plain; charset=x-user-defined');
-    }
-    request.send(null);
-    if (request.status === 0 && /^https?:/i.test(url)) {
-      error('Unable to get binary cMap at: ' + url);
-    }
-    if (nonBinaryRequest) {
-      var data = Array.prototype.map.call(request.responseText, function (ch) {
-        return ch.charCodeAt(0) & 255;
-      });
-      return new Uint8Array(data);
-    }
-    return new Uint8Array(request.response);
+    return new Promise(function (resolve, reject) {
+      var request = new XMLHttpRequest();
+      request.open('GET', url, true);
+      request.responseType = 'arraybuffer';
+      request.onreadystatechange = function () {
+        if (request.readyState === XMLHttpRequest.DONE) {
+          if (!request.response || request.status !== 200 &&
+              request.status !== 0) {
+            reject(new Error('Unable to get binary cMap at: ' + url));
+          } else {
+            resolve(new Uint8Array(request.response));
+          }
+        }
+      };
+      request.send(null);
+    });
   }
 
   function hexToInt(a, size) {
@@ -313,6 +451,14 @@ var BinaryCMapReader = (function BinaryCMapReaderClosure() {
   }
 
   function hexToStr(a, size) {
+    // This code is hot. Special-case some common values to avoid creating an
+    // object with subarray().
+    if (size === 1) {
+      return String.fromCharCode(a[0], a[1]);
+    }
+    if (size === 3) {
+      return String.fromCharCode(a[0], a[1], a[2], a[3]);
+    }
     return String.fromCharCode.apply(null, a.subarray(0, size + 1));
   }
 
@@ -416,162 +562,163 @@ var BinaryCMapReader = (function BinaryCMapReaderClosure() {
   };
 
   function processBinaryCMap(url, cMap, extend) {
-    var data = fetchBinaryData(url);
-    var stream = new BinaryCMapStream(data);
+    return fetchBinaryData(url).then(function (data) {
+      var stream = new BinaryCMapStream(data);
+      var header = stream.readByte();
+      cMap.vertical = !!(header & 1);
 
-    var header = stream.readByte();
-    cMap.vertical = !!(header & 1);
+      var useCMap = null;
+      var start = new Uint8Array(MAX_NUM_SIZE);
+      var end = new Uint8Array(MAX_NUM_SIZE);
+      var char = new Uint8Array(MAX_NUM_SIZE);
+      var charCode = new Uint8Array(MAX_NUM_SIZE);
+      var tmp = new Uint8Array(MAX_NUM_SIZE);
+      var code;
 
-    var useCMap = null;
-    var start = new Uint8Array(MAX_NUM_SIZE);
-    var end = new Uint8Array(MAX_NUM_SIZE);
-    var char = new Uint8Array(MAX_NUM_SIZE);
-    var charCode = new Uint8Array(MAX_NUM_SIZE);
-    var tmp = new Uint8Array(MAX_NUM_SIZE);
-    var code;
-
-    var b;
-    while ((b = stream.readByte()) >= 0) {
-      var type = b >> 5;
-      if (type === 7) { // metadata, e.g. comment or usecmap
-        switch (b & 0x1F) {
-          case 0:
-            stream.readString(); // skipping comment
-            break;
-          case 1:
-            useCMap = stream.readString();
-            break;
+      var b;
+      while ((b = stream.readByte()) >= 0) {
+        var type = b >> 5;
+        if (type === 7) { // metadata, e.g. comment or usecmap
+          switch (b & 0x1F) {
+            case 0:
+              stream.readString(); // skipping comment
+              break;
+            case 1:
+              useCMap = stream.readString();
+              break;
+          }
+          continue;
         }
-        continue;
-      }
-      var sequence = !!(b & 0x10);
-      var dataSize = b & 15;
+        var sequence = !!(b & 0x10);
+        var dataSize = b & 15;
 
-      assert(dataSize + 1 <= MAX_NUM_SIZE);
+        assert(dataSize + 1 <= MAX_NUM_SIZE);
 
-      var ucs2DataSize = 1;
-      var subitemsCount = stream.readNumber();
-      switch (type) {
-        case 0: // codespacerange
-          stream.readHex(start, dataSize);
-          stream.readHexNumber(end, dataSize);
-          addHex(end, start, dataSize);
-          cMap.addCodespaceRange(dataSize + 1, hexToInt(start, dataSize),
-                                 hexToInt(end, dataSize));
-          for (var i = 1; i < subitemsCount; i++) {
-            incHex(end, dataSize);
-            stream.readHexNumber(start, dataSize);
-            addHex(start, end, dataSize);
+        var ucs2DataSize = 1;
+        var subitemsCount = stream.readNumber();
+        var i;
+        switch (type) {
+          case 0: // codespacerange
+            stream.readHex(start, dataSize);
             stream.readHexNumber(end, dataSize);
             addHex(end, start, dataSize);
             cMap.addCodespaceRange(dataSize + 1, hexToInt(start, dataSize),
                                    hexToInt(end, dataSize));
-          }
-          break;
-        case 1: // notdefrange
-          stream.readHex(start, dataSize);
-          stream.readHexNumber(end, dataSize);
-          addHex(end, start, dataSize);
-          code = stream.readNumber();
-          // undefined range, skipping
-          for (var i = 1; i < subitemsCount; i++) {
-            incHex(end, dataSize);
-            stream.readHexNumber(start, dataSize);
-            addHex(start, end, dataSize);
-            stream.readHexNumber(end, dataSize);
-            addHex(end, start, dataSize);
-            code = stream.readNumber();
-            // nop
-          }
-          break;
-        case 2: // cidchar
-          stream.readHex(char, dataSize);
-          code = stream.readNumber();
-          cMap.mapOne(hexToInt(char, dataSize), String.fromCharCode(code));
-          for (var i = 1; i < subitemsCount; i++) {
-            incHex(char, dataSize);
-            if (!sequence) {
-              stream.readHexNumber(tmp, dataSize);
-              addHex(char, tmp, dataSize);
-            }
-            code = stream.readSigned() + (code + 1);
-            cMap.mapOne(hexToInt(char, dataSize), String.fromCharCode(code));
-          }
-          break;
-        case 3: // cidrange
-          stream.readHex(start, dataSize);
-          stream.readHexNumber(end, dataSize);
-          addHex(end, start, dataSize);
-          code = stream.readNumber();
-          cMap.mapRange(hexToInt(start, dataSize), hexToInt(end, dataSize),
-                        String.fromCharCode(code));
-          for (var i = 1; i < subitemsCount; i++) {
-            incHex(end, dataSize);
-            if (!sequence) {
+            for (i = 1; i < subitemsCount; i++) {
+              incHex(end, dataSize);
               stream.readHexNumber(start, dataSize);
               addHex(start, end, dataSize);
-            } else {
-              start.set(end);
+              stream.readHexNumber(end, dataSize);
+              addHex(end, start, dataSize);
+              cMap.addCodespaceRange(dataSize + 1, hexToInt(start, dataSize),
+                                     hexToInt(end, dataSize));
             }
+            break;
+          case 1: // notdefrange
+            stream.readHex(start, dataSize);
             stream.readHexNumber(end, dataSize);
             addHex(end, start, dataSize);
             code = stream.readNumber();
-            cMap.mapRange(hexToInt(start, dataSize), hexToInt(end, dataSize),
-                          String.fromCharCode(code));
-          }
-          break;
-        case 4: // bfchar
-          stream.readHex(char, ucs2DataSize);
-          stream.readHex(charCode, dataSize);
-          cMap.mapOne(hexToInt(char, ucs2DataSize),
-                      hexToStr(charCode, dataSize));
-          for (var i = 1; i < subitemsCount; i++) {
-            incHex(char, ucs2DataSize);
-            if (!sequence) {
-              stream.readHexNumber(tmp, ucs2DataSize);
-              addHex(char, tmp, ucs2DataSize);
+            // undefined range, skipping
+            for (i = 1; i < subitemsCount; i++) {
+              incHex(end, dataSize);
+              stream.readHexNumber(start, dataSize);
+              addHex(start, end, dataSize);
+              stream.readHexNumber(end, dataSize);
+              addHex(end, start, dataSize);
+              code = stream.readNumber();
+              // nop
             }
-            incHex(charCode, dataSize);
-            stream.readHexSigned(tmp, dataSize);
-            addHex(charCode, tmp, dataSize);
+            break;
+          case 2: // cidchar
+            stream.readHex(char, dataSize);
+            code = stream.readNumber();
+            cMap.mapOne(hexToInt(char, dataSize), code);
+            for (i = 1; i < subitemsCount; i++) {
+              incHex(char, dataSize);
+              if (!sequence) {
+                stream.readHexNumber(tmp, dataSize);
+                addHex(char, tmp, dataSize);
+              }
+              code = stream.readSigned() + (code + 1);
+              cMap.mapOne(hexToInt(char, dataSize), code);
+            }
+            break;
+          case 3: // cidrange
+            stream.readHex(start, dataSize);
+            stream.readHexNumber(end, dataSize);
+            addHex(end, start, dataSize);
+            code = stream.readNumber();
+            cMap.mapCidRange(hexToInt(start, dataSize), hexToInt(end, dataSize),
+                             code);
+            for (i = 1; i < subitemsCount; i++) {
+              incHex(end, dataSize);
+              if (!sequence) {
+                stream.readHexNumber(start, dataSize);
+                addHex(start, end, dataSize);
+              } else {
+                start.set(end);
+              }
+              stream.readHexNumber(end, dataSize);
+              addHex(end, start, dataSize);
+              code = stream.readNumber();
+              cMap.mapCidRange(hexToInt(start, dataSize),
+                               hexToInt(end, dataSize), code);
+            }
+            break;
+          case 4: // bfchar
+            stream.readHex(char, ucs2DataSize);
+            stream.readHex(charCode, dataSize);
             cMap.mapOne(hexToInt(char, ucs2DataSize),
                         hexToStr(charCode, dataSize));
-          }
-          break;
-        case 5: // bfrange
-          stream.readHex(start, ucs2DataSize);
-          stream.readHexNumber(end, ucs2DataSize);
-          addHex(end, start, ucs2DataSize);
-          stream.readHex(charCode, dataSize);
-          cMap.mapRange(hexToInt(start, ucs2DataSize),
-                        hexToInt(end, ucs2DataSize),
-                        hexToStr(charCode, dataSize));
-          for (var i = 1; i < subitemsCount; i++) {
-            incHex(end, ucs2DataSize);
-            if (!sequence) {
-              stream.readHexNumber(start, ucs2DataSize);
-              addHex(start, end, ucs2DataSize);
-            } else {
-              start.set(end);
+            for (i = 1; i < subitemsCount; i++) {
+              incHex(char, ucs2DataSize);
+              if (!sequence) {
+                stream.readHexNumber(tmp, ucs2DataSize);
+                addHex(char, tmp, ucs2DataSize);
+              }
+              incHex(charCode, dataSize);
+              stream.readHexSigned(tmp, dataSize);
+              addHex(charCode, tmp, dataSize);
+              cMap.mapOne(hexToInt(char, ucs2DataSize),
+                          hexToStr(charCode, dataSize));
             }
+            break;
+          case 5: // bfrange
+            stream.readHex(start, ucs2DataSize);
             stream.readHexNumber(end, ucs2DataSize);
             addHex(end, start, ucs2DataSize);
             stream.readHex(charCode, dataSize);
-            cMap.mapRange(hexToInt(start, ucs2DataSize),
-                          hexToInt(end, ucs2DataSize),
-                          hexToStr(charCode, dataSize));
-          }
-          break;
-        default:
-          error('Unknown type: ' + type);
-          break;
+            cMap.mapBfRange(hexToInt(start, ucs2DataSize),
+                            hexToInt(end, ucs2DataSize),
+                            hexToStr(charCode, dataSize));
+            for (i = 1; i < subitemsCount; i++) {
+              incHex(end, ucs2DataSize);
+              if (!sequence) {
+                stream.readHexNumber(start, ucs2DataSize);
+                addHex(start, end, ucs2DataSize);
+              } else {
+                start.set(end);
+              }
+              stream.readHexNumber(end, ucs2DataSize);
+              addHex(end, start, ucs2DataSize);
+              stream.readHex(charCode, dataSize);
+              cMap.mapBfRange(hexToInt(start, ucs2DataSize),
+                              hexToInt(end, ucs2DataSize),
+                              hexToStr(charCode, dataSize));
+            }
+            break;
+          default:
+            error('Unknown type: ' + type);
+            break;
+        }
       }
-    }
 
-    if (useCMap) {
-      extend(useCMap);
-    }
-    return cMap;
+      if (useCMap) {
+        return extend(useCMap);
+      }
+      return cMap;
+    });
   }
 
   function BinaryCMapReader() {}
@@ -640,7 +787,7 @@ var CMapFactory = (function CMapFactoryClosure() {
       obj = lexer.getObj();
       if (isInt(obj) || isString(obj)) {
         var dstLow = isInt(obj) ? String.fromCharCode(obj) : obj;
-        cMap.mapRange(low, high, dstLow);
+        cMap.mapBfRange(low, high, dstLow);
       } else if (isCmd(obj, '[')) {
         obj = lexer.getObj();
         var array = [];
@@ -648,7 +795,7 @@ var CMapFactory = (function CMapFactoryClosure() {
           array.push(obj);
           obj = lexer.getObj();
         }
-        cMap.mapRangeToArray(low, high, array);
+        cMap.mapBfRangeToArray(low, high, array);
       } else {
         break;
       }
@@ -669,7 +816,7 @@ var CMapFactory = (function CMapFactoryClosure() {
       var src = strToInt(obj);
       obj = lexer.getObj();
       expectInt(obj);
-      var dst = String.fromCharCode(obj);
+      var dst = obj;
       cMap.mapOne(src, dst);
     }
   }
@@ -690,8 +837,8 @@ var CMapFactory = (function CMapFactoryClosure() {
       var high = strToInt(obj);
       obj = lexer.getObj();
       expectInt(obj);
-      var dstLow = String.fromCharCode(obj);
-      cMap.mapRange(low, high, dstLow);
+      var dstLow = obj;
+      cMap.mapCidRange(low, high, dstLow);
     }
   }
 
@@ -725,43 +872,60 @@ var CMapFactory = (function CMapFactoryClosure() {
     }
   }
 
+  function parseCMapName(cMap, lexer) {
+    var obj = lexer.getObj();
+    if (isName(obj) && isString(obj.name)) {
+      cMap.name = obj.name;
+    }
+  }
+
   function parseCMap(cMap, lexer, builtInCMapParams, useCMap) {
     var previous;
     var embededUseCMap;
     objLoop: while (true) {
-      var obj = lexer.getObj();
-      if (isEOF(obj)) {
-        break;
-      } else if (isName(obj)) {
-        if (obj.name === 'WMode') {
-          parseWMode(cMap, lexer);
+      try {
+        var obj = lexer.getObj();
+        if (isEOF(obj)) {
+          break;
+        } else if (isName(obj)) {
+          if (obj.name === 'WMode') {
+            parseWMode(cMap, lexer);
+          } else if (obj.name === 'CMapName') {
+            parseCMapName(cMap, lexer);
+          }
+          previous = obj;
+        } else if (isCmd(obj)) {
+          switch (obj.cmd) {
+            case 'endcmap':
+              break objLoop;
+            case 'usecmap':
+              if (isName(previous)) {
+                embededUseCMap = previous.name;
+              }
+              break;
+            case 'begincodespacerange':
+              parseCodespaceRange(cMap, lexer);
+              break;
+            case 'beginbfchar':
+              parseBfChar(cMap, lexer);
+              break;
+            case 'begincidchar':
+              parseCidChar(cMap, lexer);
+              break;
+            case 'beginbfrange':
+              parseBfRange(cMap, lexer);
+              break;
+            case 'begincidrange':
+              parseCidRange(cMap, lexer);
+              break;
+          }
         }
-        previous = obj;
-      } else if (isCmd(obj)) {
-        switch (obj.cmd) {
-          case 'endcmap':
-            break objLoop;
-          case 'usecmap':
-            if (isName(previous)) {
-              embededUseCMap = previous.name;
-            }
-            break;
-          case 'begincodespacerange':
-            parseCodespaceRange(cMap, lexer);
-            break;
-          case 'beginbfchar':
-            parseBfChar(cMap, lexer);
-            break;
-          case 'begincidchar':
-            parseCidChar(cMap, lexer);
-            break;
-          case 'beginbfrange':
-            parseBfRange(cMap, lexer);
-            break;
-          case 'begincidrange':
-            parseCidRange(cMap, lexer);
-            break;
+      } catch (ex) {
+        if (ex instanceof MissingDataException) {
+          throw ex;
         }
+        warn('Invalid cMap data: ' + ex);
+        continue;
       }
     }
 
@@ -771,66 +935,79 @@ var CMapFactory = (function CMapFactoryClosure() {
       useCMap = embededUseCMap;
     }
     if (useCMap) {
-      extendCMap(cMap, builtInCMapParams, useCMap);
+      return extendCMap(cMap, builtInCMapParams, useCMap);
     }
+    return Promise.resolve(cMap);
   }
 
   function extendCMap(cMap, builtInCMapParams, useCMap) {
-    cMap.useCMap = createBuiltInCMap(useCMap, builtInCMapParams);
-    // If there aren't any code space ranges defined clone all the parent ones
-    // into this cMap.
-    if (cMap.numCodespaceRanges === 0) {
-      var useCodespaceRanges = cMap.useCMap.codespaceRanges;
-      for (var i = 0; i < useCodespaceRanges.length; i++) {
-        cMap.codespaceRanges[i] = useCodespaceRanges[i].slice();
+    return createBuiltInCMap(useCMap, builtInCMapParams).then(
+        function(newCMap) {
+      cMap.useCMap = newCMap;
+      // If there aren't any code space ranges defined clone all the parent ones
+      // into this cMap.
+      if (cMap.numCodespaceRanges === 0) {
+        var useCodespaceRanges = cMap.useCMap.codespaceRanges;
+        for (var i = 0; i < useCodespaceRanges.length; i++) {
+          cMap.codespaceRanges[i] = useCodespaceRanges[i].slice();
+        }
+        cMap.numCodespaceRanges = cMap.useCMap.numCodespaceRanges;
       }
-      cMap.numCodespaceRanges = cMap.useCMap.numCodespaceRanges;
-    }
-    // Merge the map into the current one, making sure not to override
-    // any previously defined entries.
-    for (var key in cMap.useCMap.map) {
-      if (key in cMap.map) {
-        continue;
-      }
-      cMap.map[key] = cMap.useCMap.map[key];
-    }
+      // Merge the map into the current one, making sure not to override
+      // any previously defined entries.
+      cMap.useCMap.forEach(function(key, value) {
+        if (!cMap.contains(key)) {
+          cMap.mapOne(key, cMap.useCMap.lookup(key));
+        }
+      });
+
+      return cMap;
+    });
   }
 
   function parseBinaryCMap(name, builtInCMapParams) {
     var url = builtInCMapParams.url + name + '.bcmap';
     var cMap = new CMap(true);
-    new BinaryCMapReader().read(url, cMap, function (useCMap) {
-      extendCMap(cMap, builtInCMapParams, useCMap);
+    return new BinaryCMapReader().read(url, cMap, function (useCMap) {
+      return extendCMap(cMap, builtInCMapParams, useCMap);
     });
-    return cMap;
   }
 
   function createBuiltInCMap(name, builtInCMapParams) {
     if (name === 'Identity-H') {
-      return new IdentityCMap(false, 2);
+      return Promise.resolve(new IdentityCMap(false, 2));
     } else if (name === 'Identity-V') {
-      return new IdentityCMap(true, 2);
+      return Promise.resolve(new IdentityCMap(true, 2));
     }
     if (BUILT_IN_CMAPS.indexOf(name) === -1) {
-      error('Unknown cMap name: ' + name);
+      return Promise.reject(new Error('Unknown cMap name: ' + name));
     }
-    assert (builtInCMapParams, 'buildin cmap parameters are not provided');
+    assert(builtInCMapParams, 'built-in cMap parameters are not provided');
 
     if (builtInCMapParams.packed) {
       return parseBinaryCMap(name, builtInCMapParams);
     }
 
-    var request = new XMLHttpRequest();
-    var url = builtInCMapParams.url + name;
-    request.open('GET', url, false);
-    request.send(null);
-    if (request.status === 0 && /^https?:/i.test(url)) {
-      error('Unable to get cMap at: ' + url);
-    }
-    var cMap = new CMap(true);
-    var lexer = new Lexer(new StringStream(request.responseText));
-    parseCMap(cMap, lexer, builtInCMapParams, null);
-    return cMap;
+    return new Promise(function (resolve, reject) {
+      var url = builtInCMapParams.url + name;
+      var request = new XMLHttpRequest();
+      request.onreadystatechange = function () {
+        if (request.readyState === XMLHttpRequest.DONE) {
+          if (request.status === 200 || request.status === 0) {
+            var cMap = new CMap(true);
+            var lexer = new Lexer(new StringStream(request.responseText));
+            parseCMap(cMap, lexer, builtInCMapParams, null).then(
+                function (parsedCMap) {
+              resolve(parsedCMap);
+            });
+          } else {
+            reject(new Error('Unable to get cMap at: ' + url));
+          }
+        }
+      };
+      request.open('GET', url, true);
+      request.send(null);
+    });
   }
 
   return {
@@ -840,14 +1017,20 @@ var CMapFactory = (function CMapFactoryClosure() {
       } else if (isStream(encoding)) {
         var cMap = new CMap();
         var lexer = new Lexer(encoding);
-        try {
-          parseCMap(cMap, lexer, builtInCMapParams, useCMap);
-        } catch (e) {
-          warn('Invalid CMap data. ' + e);
-        }
-        return cMap;
+        return parseCMap(cMap, lexer, builtInCMapParams, useCMap).then(
+            function (parsedCMap) {
+          if (parsedCMap.isIdentityCMap) {
+            return createBuiltInCMap(parsedCMap.name, builtInCMapParams);
+          }
+          return parsedCMap;
+        });
       }
-      error('Encoding required.');
+      return Promise.reject(new Error('Encoding required.'));
     }
   };
 })();
+
+exports.CMap = CMap;
+exports.CMapFactory = CMapFactory;
+exports.IdentityCMap = IdentityCMap;
+}));
