@@ -51,6 +51,7 @@
 !bug1200096.pdf
 !bug1068432.pdf
 !bug1146106.pdf
+!bug1252420.pdf
 !issue5564_reduced.pdf
 !canvas.pdf
 !bug1132849.pdf
@@ -204,6 +205,9 @@
 !bug946506.pdf
 !issue3885.pdf
 !bug859204.pdf
+!annotation-tx.pdf
+!annotation-tx2.pdf
+!annotation-tx3.pdf
 !coons-allflags-withfunction.pdf
 !tensor-allflags-withfunction.pdf
 !issue4246.pdf

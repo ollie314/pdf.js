@@ -93,6 +93,7 @@ var PDFAttachmentViewer = pdfAttachmentViewerLib.PDFAttachmentViewer;
 var PDFFindController = pdfFindControllerLib.PDFFindController;
 var PDFFindBar = pdfFindBarLib.PDFFindBar;
 var getGlobalEventBus = domEventsLib.getGlobalEventBus;
+var normalizeWheelEventDelta = uiUtilsLib.normalizeWheelEventDelta;
 
 var DEFAULT_SCALE_DELTA = 1.1;
 var MIN_SCALE = 0.25;
@@ -211,6 +212,7 @@ var PDFViewerApplication = {
       linkService: pdfLinkService,
       downloadManager: downloadManager,
       enhanceTextSelection: false,
+      renderInteractiveForms: false,
     });
     pdfRenderingQueue.setViewer(this.pdfViewer);
     pdfLinkService.setViewer(this.pdfViewer);
@@ -371,7 +373,10 @@ var PDFViewerApplication = {
         PDFJS.externalLinkTarget = value;
       }),
       Preferences.get('renderInteractiveForms').then(function resolved(value) {
-        PDFJS.renderInteractiveForms = value;
+        // TODO: Like the `enhanceTextSelection` preference, move the
+        //       initialization and fetching of `Preferences` to occur
+        //       before the various viewer components are initialized.
+        self.pdfViewer.renderInteractiveForms = value;
       }),
       // TODO move more preferences and other async stuff here
     ]).catch(function (reason) { });
@@ -1214,16 +1219,6 @@ var PDFViewerApplication = {
   },
 
   /**
-   * @param {number} delta - The delta value from the mouse event.
-   */
-  scrollPresentationMode: function pdfViewScrollPresentationMode(delta) {
-    if (!this.pdfPresentationMode) {
-      return;
-    }
-    this.pdfPresentationMode.mouseScroll(delta);
-  },
-
-  /**
    * @typedef UpdateUIToolbarParameters
    * @property {number} pageNumber
    * @property {string} scaleValue
@@ -1799,6 +1794,9 @@ function webViewerUpdateViewarea(e) {
 }
 
 window.addEventListener('resize', function webViewerResize(evt) {
+  if (!PDFViewerApplication.eventBus) {
+    return;
+  }
   PDFViewerApplication.eventBus.dispatch('resize');
 });
 
@@ -1991,17 +1989,12 @@ function webViewerPageChanging(e) {
 
 var zoomDisabled = false, zoomDisabledTimeout;
 function handleMouseWheel(evt) {
-  var MOUSE_WHEEL_DELTA_FACTOR = 40;
-  var ticks = (evt.type === 'DOMMouseScroll') ? -evt.detail :
-              evt.wheelDelta / MOUSE_WHEEL_DELTA_FACTOR;
-  var direction = (ticks < 0) ? 'zoomOut' : 'zoomIn';
-
   var pdfViewer = PDFViewerApplication.pdfViewer;
   if (pdfViewer.isInPresentationMode) {
-    evt.preventDefault();
-    PDFViewerApplication.scrollPresentationMode(ticks *
-                                                MOUSE_WHEEL_DELTA_FACTOR);
-  } else if (evt.ctrlKey || evt.metaKey) {
+    return;
+  }
+
+  if (evt.ctrlKey || evt.metaKey) {
     var support = PDFViewerApplication.supportedMouseWheelZoomModifierKeys;
     if ((evt.ctrlKey && !support.ctrlKey) ||
         (evt.metaKey && !support.metaKey)) {
@@ -2016,7 +2009,15 @@ function handleMouseWheel(evt) {
 
     var previousScale = pdfViewer.currentScale;
 
-    PDFViewerApplication[direction](Math.abs(ticks));
+    var delta = normalizeWheelEventDelta(evt);
+
+    var MOUSE_WHEEL_DELTA_PER_PAGE_SCALE = 3.0;
+    var ticks = delta * MOUSE_WHEEL_DELTA_PER_PAGE_SCALE;
+    if (ticks < 0) {
+      PDFViewerApplication.zoomOut(-ticks);
+    } else {
+      PDFViewerApplication.zoomIn(ticks);
+    }
 
     var currentScale = pdfViewer.currentScale;
     if (previousScale !== currentScale) {
@@ -2039,8 +2040,7 @@ function handleMouseWheel(evt) {
   }
 }
 
-window.addEventListener('DOMMouseScroll', handleMouseWheel);
-window.addEventListener('mousewheel', handleMouseWheel);
+window.addEventListener('wheel', handleMouseWheel);
 
 window.addEventListener('click', function click(evt) {
   if (!PDFViewerApplication.secondaryToolbar.isOpen) {

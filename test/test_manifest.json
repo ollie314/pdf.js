@@ -639,6 +639,14 @@
        "link": false,
        "type": "eq"
     },
+    {  "id": "issue4090",
+       "file": "pdfs/issue4090.pdf",
+       "md5": "8cec73e090985acf6094c683d7944425",
+       "rounds": 1,
+       "link": true,
+       "lastPage": 1,
+       "type": "eq"
+    },
     {  "id": "issue5202",
        "file": "pdfs/issue5202.pdf",
        "md5": "bb9cc69211112e66aab40828086a4e5a",
@@ -732,6 +740,14 @@
        "rounds": 1,
        "type": "load"
     },
+    {  "id": "f1040-annotations",
+       "file": "pdfs/f1040.pdf",
+       "md5": "7323b50c6d28d959b8b4b92c469b2469",
+       "link": true,
+       "rounds": 1,
+       "type": "eq",
+       "annotations": true
+    },
     {  "id": "f1040-forms",
        "file": "pdfs/f1040.pdf",
        "md5": "7323b50c6d28d959b8b4b92c469b2469",
@@ -767,6 +783,13 @@
        "rounds": 1,
        "link": false,
        "type": "load"
+    },
+    {  "id": "bug1252420",
+       "file": "pdfs/bug1252420.pdf",
+       "md5": "f21c911b9b655972b06ef782a1fa6a17",
+       "rounds": 1,
+       "link": false,
+       "type": "eq"
     },
     {  "id": "hudsonsurvey",
        "file": "pdfs/hudsonsurvey.pdf",
@@ -1139,6 +1162,15 @@
        "rounds": 1,
        "link": true,
        "lastPage": 1,
+       "type": "eq"
+    },
+    {  "id": "bug956965",
+       "file": "pdfs/bug956965.pdf",
+       "md5": "9b2f1176c797ee84e989a507e745f89d",
+       "rounds": 1,
+       "link": true,
+       "firstPage": 33,
+       "lastPage": 33,
        "type": "eq"
     },
     {  "id": "smaskdim",
@@ -2519,7 +2551,43 @@
       "rounds": 1,
       "type": "eq",
       "annotations": true,
-      "about": "Text widget annotation witout appearance streams."
+      "about": "Text widget annotation without appearance streams."
+    },
+    {  "id": "annotation-tx-forms",
+       "file": "pdfs/annotation-tx.pdf",
+       "md5": "56321ea830be9c4f8437ca17ac535b2d",
+       "rounds": 1,
+       "type": "eq",
+       "forms": true,
+       "about": "Text widget annotation without appearance streams."
+    },
+    {  "id": "annotation-tx2-annotations",
+       "file": "pdfs/annotation-tx2.pdf",
+       "md5": "b7a32a751895d394fc07bb6ddb40c420",
+       "rounds": 1,
+       "type": "eq",
+       "annotations": true
+    },
+    {  "id": "annotation-tx2-forms",
+       "file": "pdfs/annotation-tx2.pdf",
+       "md5": "b7a32a751895d394fc07bb6ddb40c420",
+       "rounds": 1,
+       "type": "eq",
+       "forms": true
+    },
+    {  "id": "annotation-tx3-annotations",
+       "file": "pdfs/annotation-tx3.pdf",
+       "md5": "3aec45c6465ca4959c25df17c4356a1c",
+       "rounds": 1,
+       "type": "eq",
+       "annotations": true
+    },
+    {  "id": "annotation-tx3-forms",
+       "file": "pdfs/annotation-tx3.pdf",
+       "md5": "3aec45c6465ca4959c25df17c4356a1c",
+       "rounds": 1,
+       "type": "eq",
+       "forms": true
     },
     {  "id": "gesamt",
       "file": "pdfs/gesamt.pdf",
@@ -3151,9 +3219,16 @@
        "type": "eq",
        "annotations": true
     },
+    {  "id": "annotation-text-widget-annotations",
+       "file": "pdfs/annotation-text-widget.pdf",
+       "md5": "b7b8923a12998fca8603fae53f73f19b",
+       "rounds": 1,
+       "type": "eq",
+       "annotations": true
+    },
     {  "id": "annotation-text-widget-forms",
        "file": "pdfs/annotation-text-widget.pdf",
-       "md5": "cc9672539ad5b837152a9c6961e5f106",
+       "md5": "b7b8923a12998fca8603fae53f73f19b",
        "rounds": 1,
        "type": "eq",
        "forms": true
